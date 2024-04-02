@@ -1,16 +1,9 @@
 import torch
-import torchvision
-import torchvision.transforms as transforms
 import torch.nn as nn
 
 import torch.nn.functional as F
 import numpy as np
-import models
 
-import scipy.io as sio
-import time
-
-import math
 import os
 
 
@@ -38,8 +31,8 @@ def cross_subject_loader_HGD(subject,batch_size,train_split,path,shuffle=True,M=
 		if(k+1!=subject):
 			#Load training data
 
-			traindatapath = os.path.join(path,'train',str(k+1)+"traindatanode_3cm.npy")
-			trainlabelpath = os.path.join(path,'train',str(k+1)+"trainlabelnode_3cm.npy")
+			traindatapath = os.path.join(path,str(k+1)+"traindatanode_3cm.npy")
+			trainlabelpath = os.path.join(path,str(k+1)+"trainlabelnode_3cm.npy")
 
 
 			train_eeg_data = torch.Tensor(np.load(traindatapath))
@@ -59,8 +52,8 @@ def cross_subject_loader_HGD(subject,batch_size,train_split,path,shuffle=True,M=
 		else:
 
 			#Load test data
-			testdatapath = os.path.join(path,'test',str(k+1)+"testdatanode_3cm.npy")
-			testlabelpath = os.path.join(path,'test',str(k+1)+"testlabelnode_3cm.npy")
+			testdatapath = os.path.join(path,str(k+1)+"testdatanode_3cm.npy")
+			testlabelpath = os.path.join(path,str(k+1)+"testlabelnode_3cm.npy")
 
 			test_eeg_data = torch.Tensor(np.load(testdatapath))
 			test_labels = torch.LongTensor(np.load(testlabelpath))
@@ -99,8 +92,8 @@ def all_subject_loader_HGD(batch_size,train_split,path,shuffle=True,M=4):
 		#traindatapath = path + str(k+1)+"traindata.npy"
 		#trainlabelpath = path + str(k+1)+"trainlabel.npy"
 
-		traindatapath = os.path.join(path,'train',str(k+1)+"traindatanode_3cm.npy")
-		trainlabelpath = os.path.join(path,'train',str(k+1)+"trainlabelnode_3cm.npy")
+		traindatapath = os.path.join(path,str(k+1)+"traindatanode_3cm.npy")
+		trainlabelpath = os.path.join(path,str(k+1)+"trainlabelnode_3cm.npy")
 
 		train_eeg_data = torch.Tensor(np.load(traindatapath))
 		train_labels = torch.LongTensor(np.load(trainlabelpath))
@@ -117,8 +110,8 @@ def all_subject_loader_HGD(batch_size,train_split,path,shuffle=True,M=4):
 				val_ds.append([x,y])
 
 		#Load test data
-		testdatapath = os.path.join(path,'test',str(k+1)+"testdatanode_3cm.npy")
-		testlabelpath = os.path.join(path,'test',str(k+1)+"testlabelnode_3cm.npy")
+		testdatapath = os.path.join(path,str(k+1)+"testdatanode_3cm.npy")
+		testlabelpath = os.path.join(path,str(k+1)+"testlabelnode_3cm.npy")
 
 		test_eeg_data = torch.Tensor(np.load(testdatapath))
 		test_labels = torch.LongTensor(np.load(testlabelpath))
@@ -147,8 +140,8 @@ def within_subject_loader_HGD(subject,batch_size,train_split,path,shuffle=True,M
 		CHANNEL_SUBSET=np.asarray([188, 251, 52, 71, 257, 189, 160, 23, 51, 46, 248, 122, 31, 202, 63, 221])-1
 
 
-	traindatapath = os.path.join(path,'train',str(subject)+"traindatanode_3cm.npy")
-	trainlabelpath = os.path.join(path,'train',str(subject)+"trainlabelnode_3cm.npy")
+	traindatapath = os.path.join(path,str(subject)+"traindatanode_3cm.npy")
+	trainlabelpath = os.path.join(path,str(subject)+"trainlabelnode_3cm.npy")
 
 	train_eeg_data = torch.Tensor(np.load(traindatapath))
 	train_labels = torch.LongTensor(np.load(trainlabelpath))
@@ -167,8 +160,8 @@ def within_subject_loader_HGD(subject,batch_size,train_split,path,shuffle=True,M
 		else:
 			val_ds.append([x,y])
 
-	testdatapath = os.path.join(path,'test',str(subject)+"testdatanode_3cm.npy")
-	testlabelpath = os.path.join(path,'test',str(subject)+"testlabelnode_3cm.npy")
+	testdatapath = os.path.join(path,str(subject)+"testdatanode_3cm.npy")
+	testlabelpath = os.path.join(path,str(subject)+"testlabelnode_3cm.npy")
 
 	test_eeg_data = torch.Tensor(np.load(testdatapath))
 	test_labels = torch.LongTensor(np.load(testlabelpath))

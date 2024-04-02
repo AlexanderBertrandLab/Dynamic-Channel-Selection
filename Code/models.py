@@ -1,19 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import numpy as np
 
 import math
-import time
-import scipy.io as sio
 from torch.nn.parameter import Parameter
-from torchsummary import summary
 
-from torch.nn.utils import weight_norm
-import os
-import itertools
-#from pytorch_wavelets import DWT1DForward,DWT1DInverse
-##PRUNED TRAINING
 
 epsilon = 1e-10
 
@@ -365,7 +356,7 @@ class DynamicSelectionLayer(nn.Module):
 		elif(distributionmode.lower()=='distributed'):
 			self.channel_scorer=ChannelScorer_Distributed(M,T)
 		else:
-			self.channel_scorer==ChannelScorer_Distributed_Feedback(M,T)
+			self.channel_scorer=ChannelScorer_Distributed_Feedback(M,T)
 
 		self.gumbel=Gumbel()
 		self.freeze=False
@@ -436,7 +427,6 @@ class StochasticGumbelSoftMax(nn.Module):
 	def forward(self, x, gumbel_temp=1.0,freeze=False):
 
 		gumbel_hard_temp=0.1
-		rate=torch.softmax(x/gumbel_hard_temp,dim=1)
 
 		eps = self.eps
 		u = torch.rand_like(x)
@@ -450,6 +440,8 @@ class StochasticGumbelSoftMax(nn.Module):
 			selection=make_onehot(x).float()
 		else:
 			selection=torch.softmax(x/gumbel_temp,dim=1)	
+
+		rate=torch.softmax(x/gumbel_hard_temp,dim=1)
 
 		return selection,rate
 
@@ -495,7 +487,6 @@ class ChannelScorer_Policy(nn.Module):
 		
 			# FC Layer
 			x = torch.flatten(x,start_dim=1)
-
 			x=torch.cat((x,mask.view(-1,self.M)),dim=1)
 			x = self.fc1(x)
 			out=x.view(-1,self.M,1)
@@ -543,7 +534,7 @@ class PolicySelector(nn.Module):
 
 class CMI(nn.Module):
 	
-	def __init__(self,input_dim,output_dim=4,enable_DSF=False,K=2,batchnorm=False,single_loop=False):
+	def __init__(self,input_dim,output_dim=4,enable_DSF=False,K=2,batchnorm=False,eval_mode=False):
 		super(CMI,self).__init__()
 		self.floatTensor = torch.FloatTensor if not torch.cuda.is_available() else torch.cuda.FloatTensor
 
@@ -566,7 +557,7 @@ class CMI(nn.Module):
 		self.layers = self.create_layers_field()
 		self.apply(init_weights)
 
-		self.single_loop = single_loop
+		self.eval_mode = eval_mode
 		
 	def forward(self,x):
 
@@ -578,9 +569,11 @@ class CMI(nn.Module):
 
 		for k in range(self.K):
 
-			deterministic = self.freeze or not self.training
-
 			selection,rate=self.selector(x,mask,freeze=self.freeze,temperature=self.temperature)
+			# print('K = ' + str(k))
+			# print('Sampled', selection[:5,:])
+			# print('Rate', rate[:5,:])
+			# time.sleep(10)
 
 			#Check dimensions
 			hard=make_onehot(selection)
@@ -595,7 +588,7 @@ class CMI(nn.Module):
 			if(self.enable_DSF):
 				x_sel=self.DSF(x_sel)
 
-			if(self.single_loop and not(k==self.K-1)):
+			if(self.eval_mode and not(k==self.K-1)):
 				out=set_cuda(torch.randn(x.size(0),self.output_dim))
 			else:
 				out=self.predictor(x_sel)

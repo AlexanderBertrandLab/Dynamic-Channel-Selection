@@ -4,15 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import models
-from loader import within_subject_loader_HGD, all_subject_loader_HGD
-from models import *
+from loader import all_subject_loader_HGD
+from models import DynamicSelectionNet
 
-import statistics
 from random import randint
 from torchsummary import summary
-import math
-import json
 from utils import json_write,apply_noise
 
 parser = argparse.ArgumentParser(description='PyTorch Dynamic Channel Selection')
@@ -45,9 +41,9 @@ parser.add_argument('--weight-decay', '--wd', type=float, default=5e-4,
 
 					help='weight decay')
 
-parser.add_argument('--lamba', type=float, default=0.1, 
+parser.add_argument('--lamba', type=float, default=10.0, 
 
-					help='regularization weight')
+					help='sparsity loss weight')
 
 parser.add_argument('--train_split',type=float,default=0.8,
 
@@ -95,23 +91,14 @@ def main():
 
 	global args,enable_cuda
 ################################################################ INIT #################################################################################
-	# nodemode=2
-	# exp_id=1
-	# alpha=1.0
-	# FD=10
-	# baselinemode=False
-	# randommode=False
-	# p_blackout=1.0
-	# noisemode="zero"
-	# SNR_factor=1.0
-	# mu=1.0
+
 	window_length=1125
 
 	args = parser.parse_args()
 	np.set_printoptions(linewidth=np.inf)
 
-	cwd=os.getcwd()
-	dpath=os.path.dirname(cwd)	
+	cwd=os.path.dirname(__file__)
+	dpath=os.path.dirname(cwd)
 
 	#Paths for data, model and checkpoint
 	data_path = os.path.join(dpath,'Data/')
@@ -123,6 +110,8 @@ def main():
 	checkpoint_path = os.path.join(dpath,'Models','DynamicCheckpoint'+args.name+'.pt')
 
 	performancepath = os.path.join(dpath,'Results',args.name+'.json')
+	performancepath_DSF = os.path.join(dpath,'Results',args.name+'DSF.json')
+	performancepath_distributed = os.path.join(dpath,'Results',args.name+'distributed.json')
 
 	if not os.path.isdir(os.path.join(dpath,'Models')):
 		os.makedirs(os.path.join(dpath,'Models'))
@@ -213,9 +202,9 @@ def main():
 
 			# print statistics
 			running_loss += loss.item()
-			running_reg += reg.item()
+			running_reg += args.weight_decay*reg.item()
 			running_sup_loss += sup.item()
-			running_sparsity_loss += sparsity.item()
+			running_sparsity_loss += args.lamba*sparsity.item()
 
 			expected_selection=torch.mean(sel,dim=0)
 			running_rate.append(expected_selection.detach())
@@ -402,7 +391,6 @@ def main():
 			reg = reg_loss(model)
 			sparsity = sparsity_loss(sel)
 
-			# loss = sup + args.weight_decay*reg + args.lamba*sparsity	
 			loss = sup			
 			
 			loss=loss/args.gradacc
@@ -421,9 +409,9 @@ def main():
 
 			# print statistics
 			running_loss += loss.item()
-			running_reg += reg.item()
+			running_reg += args.weight_decay*reg.item()
 			running_sup_loss += sup.item()
-			running_sparsity_loss += sparsity.item()
+			running_sparsity_loss += args.lamba*sparsity.item()
 
 			expected_selection=torch.mean(sel,dim=0)
 			running_rate.append(expected_selection.detach())
@@ -451,48 +439,24 @@ def main():
 	input_dim=[args.M,window_length]
 	train_loader,val_loader,test_loader = all_subject_loader_HGD(batch_size=args.batch_size,train_split=args.train_split,path=data_path,M=args.M)
 
-################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
+# ################################################################ Centralized Training #################################################################################
 
 	if(args.verbose):
-		print('Start training')
+		print('Start Centralized Training')
 
 	torch.manual_seed(args.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
 
-	model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=args.enable_DSF)
-	if(enable_cuda):
-		model.cuda()
-	summary(model,input_size=(1,args.M,window_length),depth=5)
+	model = DynamicSelectionNet(input_dim,distributionmode='Centralized',enable_DSF=False)
 
 	pretrained_model_path=os.path.join(dpath,'Models','Pretrained_M'+str(args.M)+'.pt')
-
-	# testmodel=MSFBCNN(input_dim)
-	# testmodel.load_state_dict(torch.load(pretrained_model_path))
-
-	# state_dict=testmodel.state_dict()
-
-	# state_dict=torch.load(pretrained_model_path)
-
-	# print(state_dict.keys())
-
-	# for key in list(state_dict.keys()):
-	# 	state_dict[key.replace('network.', '')] = state_dict.pop(key)
-
-	# state_dict.pop('selection_layer.qz_loga')
-
-	# print(state_dict.keys())
-
-
-	# torch.save(state_dict,pretrained_model_path)
-
 	model.network.load_state_dict(torch.load(pretrained_model_path))
 
-
 	if(enable_cuda):
-		model.network.load_state_dict(torch.load(pretrained_model_path))
-	else:
-		model.network.load_state_dict(torch.load(pretrained_model_path,map_location='cpu'))
+		model.cuda()
+
+	summary(model,input_size=(1,args.M,window_length),depth=5)
 
 	optimizer = torch.optim.Adam([{'params': model.selection_layer.parameters()},
 								{'params': model.network.parameters(), 'lr': args.lr_finetune}], lr=args.lr)
@@ -523,7 +487,7 @@ def main():
 		epoch+=1
 
 	if(args.verbose):
-		print('Dynamic selection finished')
+		print('Centralized Training finished')
 
 	#Store subject independent model
 	model.load_state_dict(torch.load(checkpoint_path))
@@ -532,29 +496,29 @@ def main():
 	#Evaluate model
 	tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
 
-	# full_dict=vars(args)
+	full_dict=vars(args)
 
-	# results_dict={
-	# 	"Test accuracy": test_acc,
-	# 	"Rate": torch.squeeze(rate).cpu().data.numpy().round(3).T.tolist(),
-	# }
+	results_dict={
+		"Test accuracy": test_acc,
+		"Rate": torch.squeeze(rate).cpu().data.numpy().round(3).T.tolist(),
+	}
 
-	# full_dict.update(results_dict)
-	# json_write(performancepath,full_dict)
+	full_dict.update(results_dict)
+	json_write(performancepath,full_dict)
 
 ################################################################ ADD DSF #################################################################################
 
 	if(args.verbose):
-		print('Start training')
+		print('Start DSF Training')
 
 	torch.manual_seed(args.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
 
-	pretrained_model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=False)
+	pretrained_model = DynamicSelectionNet(input_dim,distributionmode='Centralized',enable_DSF=False)
 	pretrained_model.load_state_dict(torch.load(model_save_path))
 
-	model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=True)
+	model = DynamicSelectionNet(input_dim,distributionmode='Centralized',enable_DSF=args.enable_DSF)
 	if(enable_cuda):
 		model.cuda()
 		pretrained_model.cuda()
@@ -564,9 +528,12 @@ def main():
 
 	summary(model,input_size=(1,args.M,window_length),depth=5)
 
-	optimizer = torch.optim.Adam([{'params': model.selection_layer.DSF.parameters()},
-								{'params': model.selection_layer.channel_scorer.parameters(), 'lr': args.lr_finetune},
-								{'params': model.network.parameters(), 'lr': args.lr_finetune}], lr=args.lr)
+	if(args.enable_DSF):
+		optimizer = torch.optim.Adam([{'params': model.selection_layer.DSF.parameters()},
+									{'params': model.selection_layer.channel_scorer.parameters(), 'lr': args.lr_finetune},
+									{'params': model.network.parameters(), 'lr': args.lr_finetune}], lr=args.lr)
+	else:
+		optimizer = torch.optim.Adam(model.parameters(), lr=args.lr_finetune)	
 
 	prev_val_loss = 100
 	patience_timer = 0
@@ -594,7 +561,7 @@ def main():
 		epoch+=1
 
 	if(args.verbose):
-		print('DSF finished')
+		print('DSF Training finished')
 
 	#Store subject independent model
 	model.load_state_dict(torch.load(checkpoint_path))
@@ -603,15 +570,15 @@ def main():
 	#Evaluate model
 	tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
 
-	# full_dict=vars(args)
+	full_dict=vars(args)
 
-	# results_dict={
-	# 	"Test accuracy": test_acc,
-	# 	"Rate": torch.squeeze(rate).cpu().data.numpy().round(3).T.tolist(),
-	# }
+	results_dict={
+		"Test accuracy": test_acc,
+		"Rate": torch.squeeze(rate).cpu().data.numpy().round(3).T.tolist(),
+	}
 
-	# full_dict.update(results_dict)
-	# json_write(performancepath,full_dict)
+	full_dict.update(results_dict)
+	json_write(performancepath_DSF,full_dict)
 
 
 
@@ -627,18 +594,24 @@ def main():
 	centralized_model = DynamicSelectionNet(input_dim,distributionmode='Centralized',enable_DSF=args.enable_DSF)
 	centralized_model.load_state_dict(torch.load(model_save_path_DSF))
 
-	model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=args.enable_DSFs)
+	model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=args.enable_DSF)
+	model.network.load_state_dict(centralized_model.network.state_dict())
+	if(args.enable_DSF):
+		model.selection_layer.DSF.load_state_dict(centralized_model.selection_layer.DSF.state_dict())
+
 	if(enable_cuda):
 		model.cuda()
 		centralized_model.cuda()
 
-	model.network.load_state_dict(centralized_model.network.state_dict())
-
 	summary(model,input_size=(1,args.M,window_length),depth=5)
 
-	optimizer = torch.optim.Adam([{'params': model.selection_layer.channel_scorer.parameters()},
-								{'params': model.selection_layer.DSF.parameters(), 'lr': 0.0},
-								{'params': model.network.parameters(), 'lr': 0.0}], lr=args.lr)
+	if(args.enable_DSF):
+		optimizer = torch.optim.Adam([{'params': model.selection_layer.channel_scorer.parameters()},
+									{'params': model.selection_layer.DSF.parameters(), 'lr': 0.0},
+									{'params': model.network.parameters(), 'lr': args.lr_finetune}], lr=args.lr)
+	else:
+		optimizer = torch.optim.Adam([{'params': model.selection_layer.channel_scorer.parameters()},
+									{'params': model.network.parameters(), 'lr': args.lr_finetune}], lr=args.lr)	
 
 	prev_val_loss = 100
 	patience_timer = 0
@@ -652,7 +625,7 @@ def main():
 		val_loss = validate(val_loader,model,epoch)
 		tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
 
-		if((epoch >100) and (val_loss>prev_val_loss-args.stop_delta)):
+		if((epoch >50) and (val_loss>prev_val_loss-args.stop_delta)):
 			patience_timer+=1
 			if(args.verbose):
 				print('Early stopping timer ', patience_timer)
@@ -675,18 +648,6 @@ def main():
 	#Evaluate model
 	tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
 
-	# full_dict=vars(args)
-
-	# results_dict={
-	# 	"Test accuracy": test_acc,
-	# 	"Rate": torch.squeeze(rate).cpu().data.numpy().round(3).T.tolist(),
-	# }
-
-	# full_dict.update(results_dict)
-	# json_write(performancepath,full_dict)
-
-
-
 ################################################################ Distributed Step 2 #################################################################################
 
 	if(args.verbose):
@@ -696,17 +657,15 @@ def main():
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
 
-	model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=args.enable_DSFs)
+	model = DynamicSelectionNet(input_dim,distributionmode=args.distributionmode,enable_DSF=args.enable_DSF)
+	model.load_state_dict(torch.load(model_save_path_distributed))
+
 	if(enable_cuda):
 		model.cuda()
 
-	model.load_state_dict(torch.load(model_save_path_distributed))
-
 	summary(model,input_size=(1,args.M,window_length),depth=5)
 
-	optimizer = torch.optim.Adam([{'params': model.selection_layer.channel_scorer.parameters()},
-								{'params': model.selection_layer.DSF.parameters()},
-								{'params': model.network.parameters()}], lr=args.lr_finetune)
+	optimizer = torch.optim.Adam(model.parameters(), lr=args.lr_finetune)
 
 	prev_val_loss = 100
 	patience_timer = 0
@@ -720,7 +679,7 @@ def main():
 		val_loss = validate(val_loader,model,epoch)
 		tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
 
-		if((epoch >100) and (val_loss>prev_val_loss-args.stop_delta)):
+		if((epoch >50) and (val_loss>prev_val_loss-args.stop_delta)):
 			patience_timer+=1
 			if(args.verbose):
 				print('Early stopping timer ', patience_timer)
@@ -734,7 +693,7 @@ def main():
 		epoch+=1
 
 	if(args.verbose):
-		print('Distributed Step 1 finished')
+		print('Distributed Step 2 finished')
 
 	#Store subject independent model
 	model.load_state_dict(torch.load(checkpoint_path))
@@ -751,7 +710,7 @@ def main():
 	}
 
 	full_dict.update(results_dict)
-	json_write(performancepath,full_dict)
+	json_write(performancepath_distributed,full_dict)
 if __name__ == '__main__':
 
 	main()

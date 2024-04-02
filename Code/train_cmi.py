@@ -4,15 +4,11 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
-import models
 from loader import within_subject_loader_HGD, all_subject_loader_HGD
-from models import *
+from models import CMI
 
-import statistics
 from random import randint
 from torchsummary import summary
-import math
-import json
 from utils import json_write,exponential_decay_schedule,apply_noise
 
 parser = argparse.ArgumentParser(description='PyTorch Greedy Conditional Mutual Information')
@@ -49,7 +45,7 @@ parser.add_argument('--weight-decay', '--wd', type=float, default=5e-4,
 
 					help='weight decay')
 
-parser.add_argument('--lamba', type=float, default=0.1, 
+parser.add_argument('--lamba', type=float, default=10.0, 
 
 					help='regularization weight')
 
@@ -77,10 +73,6 @@ parser.add_argument('--target', type=float, default=0.5,
 
 					help='Target transmission rate')
 
-parser.add_argument('--distributionmode', type=str, default='Centralized',
-
-					help='Mode of operation for the channel scoring function, options are "Centralized", "Distributed", "Distributed-Feedback" ')
-
 parser.add_argument('--noise_prob', type=float, default=0.0,
 
 					help = 'Probability of noise burst occuring on each channel')
@@ -100,10 +92,12 @@ def main():
 	global args,enable_cuda
 ################################################################ INIT #################################################################################
 	
+	window_length=1125
+
 	args = parser.parse_args()
 	np.set_printoptions(linewidth=np.inf)
 
-	cwd=os.getcwd()
+	cwd=os.path.dirname(__file__)
 	dpath=os.path.dirname(cwd)	
 
 	#Paths for data, model and checkpoint
@@ -112,9 +106,12 @@ def main():
 	dpath=os.path.dirname(cwd)
 
 	model_save_path = os.path.join(dpath,'Models','CMI'+args.name+'.pt')
+	model_save_path_DSF = os.path.join(dpath,'Models','CMI'+args.name+'DSF.pt')
+
 	checkpoint_path = os.path.join(dpath,'Models','CMI'+args.name+'.pt')
 
 	performancepath = os.path.join(dpath,'Results',args.name+'.json')
+	performancepath_DSF = os.path.join(dpath,'Results',args.name+'DSF.json')
 
 	if not os.path.isdir(os.path.join(dpath,'Models')):
 		os.makedirs(os.path.join(dpath,'Models'))
@@ -163,9 +160,9 @@ def main():
 
 		expected_selection=torch.mean(selection,dim=0)
 
+
 		if(args.balanced):
 			sparsity= torch.clamp(torch.max(expected_selection) - args.target,min=0.0)**2
-
 		else:
 			sparsity = torch.clamp(torch.mean(expected_selection) - args.target,min=0.0)**2
 		
@@ -222,7 +219,7 @@ def main():
 
 			# print statistics
 			running_loss += loss.item()
-			running_reg += reg.item()
+			running_reg += args.weight_decay*reg.item()
 			running_sup_loss += sup.item()
 			running_sparsity_loss += sparsity.item()
 
@@ -237,7 +234,6 @@ def main():
 					print('[%d, %5d] loss: %.3f acc: %d %% supervised loss: %.3f regularization loss %.3f sparsity loss %.5f'%
 							(epoch + 1, i + 1, running_loss / N, 100*running_acc[0]/running_acc[1], running_sup_loss/N, running_reg/N, running_sparsity_loss/N))
 					print('Rate: ' + str(100*torch.squeeze(running_rate).cpu().data.numpy().T) )
-
 
 				running_loss = 0.0
 				running_reg = 0.0
@@ -384,14 +380,14 @@ def main():
 	#Load data
 	num_subjects = 14
 
-	input_dim=[args.M,1125]
+	input_dim=[args.M,window_length]
 	train_loader,val_loader,test_loader = all_subject_loader_HGD(batch_size=args.batch_size,train_split=args.train_split,path=data_path,M=args.M)
 
 
-	################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
+	################################################################ CMI Training #################################################################################
 
 	if(args.verbose):
-		print('Start training')
+		print('Start CMI training')
 
 	torch.manual_seed(args.seed)
 	torch.backends.cudnn.deterministic = True
@@ -399,25 +395,16 @@ def main():
 
 	temperature_schedule = exponential_decay_schedule(5.0,1.0,args.epochs,int(args.epochs*3/4))
 
-	model = CMI(input_dim,enable_DSF=args.enable_DSF,K=args.K,batchnorm=False)
+	model = CMI(input_dim,enable_DSF=False,K=args.K,batchnorm=False)
+	pretrained_model_path=os.path.join(dpath,'Models','Pretrained_M'+str(args.M)+'.pt')
+	model.predictor.load_state_dict(torch.load(pretrained_model_path))
 
 	if(enable_cuda):
 		model.cuda()
-	summary(model,input_size=(1,args.M,1125),depth=5)
 
+	summary(model,input_size=(1,args.M,window_length),depth=5)
 
-	pretrained_model_path=os.path.join(dpath,'Models','Pretrained_M'+str(args.M)+'.pt')
-	if(enable_cuda):
-		model.predictor.load_state_dict(torch.load(pretrained_model_path))
-	else:
-		model.predictor.load_state_dict(torch.load(pretrained_model_path,map_location='cpu'))
-
-	if(args.enable_DSF):
-		optimizer = torch.optim.Adam([{'params': model.selector.parameters()},
-									{'params': model.DSF.parameters()},
-									{'params': model.predictor.parameters(), 'lr': args.lr_finetune}],lr=args.lr)
-	else:
-		optimizer = torch.optim.Adam([{'params': model.selector.parameters()},
+	optimizer = torch.optim.Adam([{'params': model.selector.parameters()},
 									{'params': model.predictor.parameters(), 'lr': args.lr_finetune}],lr=args.lr)		
 
 	prev_val_loss = 100
@@ -448,7 +435,7 @@ def main():
 		epoch+=1
 
 	if(args.verbose):
-		print('Channel selection finished')
+		print('CMI Training finished')
 
 	#Store subject independent model
 	model.load_state_dict(torch.load(checkpoint_path))
@@ -456,23 +443,18 @@ def main():
 
 	tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
 
-################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
-################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
-################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
-################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
-################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
+################################################################ CMI finetuning at specific amount of channels #################################################################################
 
 	if(args.verbose):
-		print('Start finetune')
+		print('Start CMI Finetuning')
 
 	torch.manual_seed(args.seed)
 	torch.backends.cudnn.deterministic = True
 	torch.backends.cudnn.benchmark = False
 
+	summary(model,input_size=(1,args.M,window_length),depth=5)
 
-	summary(model,input_size=(1,args.M,1125),depth=5)
-
-	model = CMI(input_dim,enable_DSF=args.enable_DSF,K=args.K,batchnorm=False,single_loop=True)
+	model = CMI(input_dim,enable_DSF=False,K=args.K,batchnorm=False,eval_mode=True)
 	model.load_state_dict(torch.load(model_save_path))
 	if(enable_cuda):
 		model.cuda()
@@ -480,10 +462,80 @@ def main():
 	optimizer = torch.optim.Adam([{'params': model.selector.parameters()},
 								{'params': model.predictor.parameters(), 'lr': args.lr_finetune}],lr=0.0)
 
+	prev_val_loss = 100
+	patience_timer = 0
+	early_stop = False
+	epoch = 0
+
+	model.set_freeze(True)				
+
+	while epoch in range(args.epochs) and (not early_stop):
+
+		model.set_temperature(temperature_schedule[-1])
+
+		#Perform training step
+		train(train_loader, model, optimizer,epoch,finetune=True)
+		val_loss = validate(val_loader,model,epoch,finetune=True)
+		tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
+
+		if((epoch >10) and (val_loss>prev_val_loss-args.stop_delta)):
+			patience_timer+=1
+			if(args.verbose):
+				print('Early stopping timer ', patience_timer)
+			if(patience_timer == args.patience):
+				early_stop = True
+		else:
+			patience_timer=0
+			torch.save(model.state_dict(),checkpoint_path)
+			prev_val_loss = val_loss
+
+		epoch+=1
+
+	if(args.verbose):
+		print('CMI Finetuning finished')
+
+	#Store subject independent model
+	model.load_state_dict(torch.load(checkpoint_path))
+	torch.save(model.state_dict(), model_save_path)
+
+	#Evaluate model
+	tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
+
+	full_dict=vars(args)
+
+	results_dict={
+		"Test accuracy": test_acc,
+		"Rate": torch.squeeze(rate).cpu().data.numpy().round(3).T.tolist(),
+	}
+
+	full_dict.update(results_dict)
+
+	json_write(performancepath,full_dict)
+
+
+################################################################ SUBJECT-INDEPENDENT CHANNEL SELECTION #################################################################################
+
+	if(args.verbose):
+		print('Start DSF training')
+
+	torch.manual_seed(args.seed)
+	torch.backends.cudnn.deterministic = True
+	torch.backends.cudnn.benchmark = False
+
+	summary(model,input_size=(1,args.M,window_length),depth=5)
+
+	pretrained_model=CMI(input_dim,enable_DSF=False,K=args.K,batchnorm=False,eval_mode=True)
+	model = CMI(input_dim,enable_DSF=args.enable_DSF,K=args.K,batchnorm=False,eval_mode=True)
+	pretrained_model.load_state_dict(torch.load(model_save_path))
+	model.predictor.load_state_dict(pretrained_model.predictor.state_dict())
+	model.selector.load_state_dict(pretrained_model.selector.state_dict())
+
+	if(enable_cuda):
+		model.cuda()
 
 	if(args.enable_DSF):
 		optimizer = torch.optim.Adam([{'params': model.selector.parameters()},
-									{'params': model.softfuser.parameters(), 'lr': args.lr_finetune},
+									{'params': model.DSF.parameters(), 'lr': args.lr},
 									{'params': model.predictor.parameters(), 'lr': args.lr_finetune}],lr=0.0)
 	else:
 		optimizer = torch.optim.Adam([{'params': model.selector.parameters()},
@@ -519,11 +571,11 @@ def main():
 		epoch+=1
 
 	if(args.verbose):
-		print('Channel selection finished')
+		print('DSF training finished')
 
 	#Store subject independent model
 	model.load_state_dict(torch.load(checkpoint_path))
-	torch.save(model.state_dict(), model_save_path)
+	torch.save(model.state_dict(), model_save_path_DSF)
 
 	#Evaluate model
 	tr_acc,val_acc,test_acc,rate=test(train_loader,val_loader,test_loader,model,epoch)
@@ -537,7 +589,7 @@ def main():
 
 	full_dict.update(results_dict)
 
-	json_write(performancepath,full_dict)
+	json_write(performancepath_DSF,full_dict)
 
 if __name__ == '__main__':
 
