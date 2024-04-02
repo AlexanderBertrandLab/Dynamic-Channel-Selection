@@ -37,7 +37,7 @@ parser.add_argument('--lr_finetune', type=float, default=0.0001,
 
 					help='learning rate during finetuning')
 
-parser.add_argument('--weight-decay', '--wd', type=float, default=5e-4, 
+parser.add_argument('--weight-decay', '--wd', type=float, default=0.0, 
 
 					help='weight decay')
 
